@@ -293,6 +293,39 @@ document.getElementById("reset").addEventListener("click", function(){
   save(); render();
 });
 
+/* Prefill the shift header from URL params (?veh=&op=&date=&crew=), e.g. the
+   link dropped into the calendar event / Slack by the automation script.
+   Safe: never wipes existing marks without asking. */
+(function applyUrlParams(){
+  var qs = window.location.search;
+  if(!qs || qs.length < 2) return;
+  var p = {};
+  qs.replace(/^\?/,"").split("&").forEach(function(kv){
+    var i = kv.indexOf("="); if(i < 0) return;
+    p[decodeURIComponent(kv.slice(0,i))] = decodeURIComponent(kv.slice(i+1).replace(/\+/g," "));
+  });
+  if(!(p.veh || p.op || p.date || p.crew)) return;
+
+  var haveMarks = state.entries && state.entries.length;
+  if(haveMarks && p.veh && state.veh && p.veh !== state.veh){
+    if(confirm("Start a new shift for " + p.veh + "? Current marks for " +
+               (state.veh || "this shift") + " will be cleared. Export first if needed.")){
+      state = { veh:"", op:"", date:today(), crew:"", entries:[] };
+    } else { stripQuery(); return; }
+  }
+  if(p.veh)  state.veh  = p.veh;
+  if(p.op)   state.op   = p.op;
+  if(p.date) state.date = p.date;
+  if(p.crew) state.crew = p.crew;
+  document.getElementById("veh").value  = state.veh;
+  document.getElementById("op").value   = state.op;
+  document.getElementById("date").value = state.date || today();
+  document.getElementById("crew").value = state.crew;
+  save();
+  stripQuery();
+})();
+function stripQuery(){ try{ history.replaceState(null, "", window.location.pathname); }catch(e){} }
+
 render();
 </script>
 </body>
