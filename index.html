@@ -140,7 +140,7 @@
       <button class="btn" id="download" type="button">Download</button>
       <button class="btn" id="copy" type="button">Copy</button>
     </div>
-    <p class="note">On a phone, <b>Share</b> is the reliable one — it sends the CSV <b>and any voice notes</b> together to Slack, Mail, or Notes. If a button does nothing, long-press the text above and choose Copy. (Copy/Download are text-only — use Share, or a clip's own Share button, to move the audio.)</p>
+    <p class="note">On a phone, <b>Share</b> is the reliable one — send it to Slack, Mail, or Notes. If a button does nothing, long-press the text above and choose Copy.</p>
     <button class="btn close" id="closePanel" type="button">Close</button>
   </div>
 
@@ -192,7 +192,7 @@ function getClip(id){ return dbPromise.then(function(){
   });
 });}
 function delClip(id){ return dbPromise.then(function(){
-  delete _mem[id];
+  delete _mem[id]; delete _clipCache[id];
   if(!DB_OK){ return; }
   return new Promise(function(res){
     try{
@@ -203,7 +203,7 @@ function delClip(id){ return dbPromise.then(function(){
   });
 });}
 function clearClips(){ return dbPromise.then(function(){
-  _mem = {};
+  _mem = {}; _clipCache = {};
   if(!DB_OK){ return; }
   return new Promise(function(res){
     try{
@@ -218,6 +218,7 @@ function clearClips(){ return dbPromise.then(function(){
 var MR_OK = !!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia && window.MediaRecorder);
 var rec = null;          // {recorder, id, t0, timer, cap, cancelled}
 var _playUrl = null;     // last object URL, revoked on replace
+var _clipCache = {};     // id -> {blob,mime,name}, kept in memory so Share/Play can run without an async hop
 
 function entryById(id){
   for(var i=0;i<state.entries.length;i++){ if(state.entries[i].id===id) return state.entries[i]; }
@@ -251,6 +252,7 @@ function startRec(id){
       var ext = (type.indexOf("mp4")>-1 || type.indexOf("aac")>-1) ? "m4a" : "webm";
       var e = entryById(id);
       var name = clipName(e, ext);
+      _clipCache[id] = {blob:blob, mime:type, name:name};
       putClip(id, {blob:blob, mime:type, name:name}).then(function(){
         if(e){ e.hasAudio = true; e.audioName = name; }
         save(); render(); flash("voice note saved");
@@ -284,28 +286,44 @@ function updateRecTimer(){
 function playClip(id, audioEl){
   getClip(id).then(function(r){
     if(!r || !r.blob){ flash("clip not found"); return; }
+    _clipCache[id] = r;
     if(_playUrl){ try{ URL.revokeObjectURL(_playUrl); }catch(e){} }
     _playUrl = URL.createObjectURL(r.blob);
     audioEl.src = _playUrl; audioEl.style.display = "block";
     audioEl.play().catch(function(){});
   });
 }
+function doShareClip(r, mayNeedRetry){
+  try{
+    var file = new File([r.blob], r.name || "clip", {type:r.mime||"audio/webm"});
+    if(navigator.canShare && navigator.canShare({files:[file]})){
+      navigator.share({files:[file], title:r.name}).then(function(){flash("shared");}).catch(function(err){
+        if(err && err.name==="AbortError") return;
+        flash(mayNeedRetry ? "clip ready — tap Share clip again" : "sharing unavailable — will download");
+        if(!mayNeedRetry) downloadClip(r);
+      });
+      return;
+    }
+  }catch(e){}
+  downloadClip(r);
+}
+function downloadClip(r){
+  try{
+    var a = document.createElement("a");
+    a.href = URL.createObjectURL(r.blob); a.download = r.name || "clip";
+    document.body.appendChild(a); a.click(); document.body.removeChild(a);
+    flash("downloaded");
+  }catch(e){ flash("could not share clip"); }
+}
 function shareClip(id){
+  // Share synchronously when the blob is already in memory (preserves the tap's
+  // activation). If it isn't loaded yet, fetch it, then the next tap will share.
+  var cached = _clipCache[id];
+  if(cached){ doShareClip(cached, false); return; }
   getClip(id).then(function(r){
     if(!r || !r.blob){ flash("clip not found"); return; }
-    try{
-      var file = new File([r.blob], r.name || ("clip_"+id), {type:r.mime||"audio/webm"});
-      if(navigator.canShare && navigator.canShare({files:[file]})){
-        navigator.share({files:[file], title:r.name}).then(function(){flash("shared");}).catch(function(){});
-        return;
-      }
-    }catch(e){}
-    try{
-      var a = document.createElement("a");
-      a.href = URL.createObjectURL(r.blob); a.download = r.name || ("clip_"+id);
-      document.body.appendChild(a); a.click(); document.body.removeChild(a);
-      flash("downloaded");
-    }catch(e){ flash("could not share clip"); }
+    _clipCache[id] = r;
+    doShareClip(r, true);
   });
 }
 
@@ -487,10 +505,10 @@ function esc(s){ return String(s||"").replace(/&/g,"&amp;").replace(/"/g,"&quot;
 
 /* CSV */
 function csv(){
-  var head = ["shift_date","vehicle","operator","crew","event_time_local","event_time_iso","type","location","note","audio_file"];
+  var head = ["shift_date","vehicle","operator","crew","event_time_local","event_time_iso","type","location","note"];
   var rows = [head];
   state.entries.slice().reverse().forEach(function(e){
-    rows.push([state.date, state.veh, state.op, state.crew, e.local, e.iso, e.type, e.location, e.note, (e.hasAudio ? (e.audioName||"") : "")]);
+    rows.push([state.date, state.veh, state.op, state.crew, e.local, e.iso, e.type, e.location, e.note]);
   });
   return rows.map(function(r){ return r.map(function(c){
     c = String(c==null?"":c);
@@ -510,25 +528,26 @@ document.getElementById("closePanel").addEventListener("click", function(){
   document.getElementById("panel").style.display="none";
 });
 
-/* Share — best path on mobile. Bundles the CSV + every voice note when the
-   platform allows multi-file sharing; otherwise falls back to CSV alone. */
+/* Share — must run synchronously inside the tap. The browser only allows
+   navigator.share during a live user gesture, and that permission is lost the
+   moment we await anything (e.g. an IndexedDB read). So we share the CSV alone
+   here; voice notes go out via each clip's own "Share clip" button. */
 document.getElementById("share").addEventListener("click", function(){
   var data = csv();
-  var ids = state.entries.filter(function(e){return e.hasAudio;}).map(function(e){return e.id;});
-  Promise.all(ids.map(getClip)).then(function(clips){
-    var files = [];
-    try{ files.push(new File([data], fname(), {type:"text/csv"})); }catch(e){}
-    clips.forEach(function(r){
-      if(r && r.blob){ try{ files.push(new File([r.blob], r.name, {type:r.mime||"audio/webm"})); }catch(e){} }
-    });
-    if(navigator.canShare && files.length && navigator.canShare({files:files})){
-      navigator.share({files:files, title:fname()}).then(function(){flash("shared");}).catch(function(){});
+  function onErr(err){ if(!err || err.name!=="AbortError") flash("sharing unavailable here — use Download"); }
+  try{
+    var file = new File([data], fname(), {type:"text/csv"});
+    if(navigator.canShare && navigator.canShare({files:[file]})){
+      navigator.share({files:[file], title:fname()}).then(function(){flash("shared");}).catch(onErr);
       return;
     }
-    // couldn't share files (too many, or unsupported): share CSV text, else download
-    if(navigator.share){ navigator.share({title:fname(), text:data}).then(function(){flash("shared");}).catch(function(){}); }
-    else downloadCsv();
-  });
+  }catch(e){}
+  if(navigator.share){
+    navigator.share({title:fname(), text:data}).then(function(){flash("shared");}).catch(onErr);
+    return;
+  }
+  // No Web Share API at all — desktop browser, or the page isn't served over https.
+  flash("no share on this device — use Download or Copy");
 });
 
 /* Download — works desktop + Android */
