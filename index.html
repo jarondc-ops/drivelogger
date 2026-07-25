@@ -77,6 +77,22 @@
   .panel .row{display:grid; grid-template-columns:1fr 1fr 1fr; gap:8px; margin-top:8px;}
   .panel .close{margin-top:8px; width:100%;}
   .panel .note{color:var(--muted); font-size:12px; margin:8px 0 0; line-height:1.4;}
+
+  /* audio notes */
+  .arow{display:flex; flex-wrap:wrap; gap:8px; margin-top:8px; align-items:center;}
+  .abtn{padding:9px 13px; font-size:14px; font-weight:600; border-radius:9px;
+    border:1px solid var(--line); background:#0f151e; color:var(--ink); touch-action:manipulation;}
+  .abtn.rec{color:var(--mark); border-color:#40241f;}
+  .abtn.stop{background:var(--mark); color:#0a0e14; border-color:var(--mark);}
+  .abtn.play{color:var(--ok); border-color:#14361f;}
+  .abtn.x{color:var(--muted); padding:9px 12px;}
+  .rectime{color:var(--mark); font-weight:700; font-variant-numeric:tabular-nums;
+    display:inline-flex; align-items:center; gap:7px;}
+  .rectime::before{content:""; width:9px; height:9px; border-radius:50%; background:var(--mark);
+    display:inline-block; animation:blink 1s steps(2,start) infinite;}
+  @keyframes blink{to{visibility:hidden;}}
+  .aud{width:100%; margin-top:8px;}
+  .a-hint{color:var(--muted); font-size:12px; text-align:center; margin:0 0 14px; line-height:1.4;}
 </style>
 </head>
 <body>
@@ -92,7 +108,8 @@
   </div>
 
   <button class="markbtn" id="mark" type="button">MARK</button>
-  <p class="hint">Passenger logs while moving. Solo drivers: tap MARK only, then classify and add notes when parked. Nothing here needs typing while driving.</p>
+  <p class="hint">Passenger logs while moving. Solo drivers: tap MARK only, then classify and add notes — typed or spoken — when parked. Nothing here needs typing while driving.</p>
+  <p class="a-hint" id="ahint"></p>
 
   <div class="tags">
     <span class="lbl">Tag the last mark (optional)</span>
@@ -123,7 +140,7 @@
       <button class="btn" id="download" type="button">Download</button>
       <button class="btn" id="copy" type="button">Copy</button>
     </div>
-    <p class="note">On a phone, <b>Share</b> is the reliable one — send it to Slack, Mail, or Notes. If a button does nothing, long-press the text above and choose Copy.</p>
+    <p class="note">On a phone, <b>Share</b> is the reliable one — it sends the CSV <b>and any voice notes</b> together to Slack, Mail, or Notes. If a button does nothing, long-press the text above and choose Copy. (Copy/Download are text-only — use Share, or a clip's own Share button, to move the audio.)</p>
     <button class="btn close" id="closePanel" type="button">Close</button>
   </div>
 
@@ -136,6 +153,161 @@ var STORE_OK = (function(){
   try{ localStorage.setItem("__t","1"); localStorage.removeItem("__t"); return true; }
   catch(e){ return false; }
 })();
+
+/* ---- audio notes: clips live in IndexedDB (localStorage is too small for
+   binary), with an in-memory fallback so recording still works in a view where
+   IDB is unavailable — mirrors the STORE_OK pattern above. ---- */
+var AUDIO_DB = "atoms.drivelogger.audio", AUDIO_STORE = "clips";
+var _db = null, DB_OK = false, _mem = {};
+var dbPromise = (function(){
+  return new Promise(function(res){
+    if(!window.indexedDB){ res(); return; }
+    var req;
+    try{ req = indexedDB.open(AUDIO_DB, 1); }catch(e){ res(); return; }
+    req.onupgradeneeded = function(){ req.result.createObjectStore(AUDIO_STORE); };
+    req.onsuccess = function(){ _db = req.result; DB_OK = true; res(); };
+    req.onerror   = function(){ res(); };
+  });
+})();
+
+function putClip(id, rec){ return dbPromise.then(function(){
+  if(!DB_OK){ _mem[id] = rec; return; }
+  return new Promise(function(res){
+    try{
+      var tx = _db.transaction(AUDIO_STORE,"readwrite");
+      tx.objectStore(AUDIO_STORE).put(rec, id);
+      tx.oncomplete = function(){ res(); };
+      tx.onerror    = function(){ _mem[id] = rec; res(); };
+    }catch(e){ _mem[id] = rec; res(); }
+  });
+});}
+function getClip(id){ return dbPromise.then(function(){
+  if(!DB_OK){ return _mem[id] || null; }
+  return new Promise(function(res){
+    try{
+      var rq = _db.transaction(AUDIO_STORE,"readonly").objectStore(AUDIO_STORE).get(id);
+      rq.onsuccess = function(){ res(rq.result || _mem[id] || null); };
+      rq.onerror   = function(){ res(_mem[id] || null); };
+    }catch(e){ res(_mem[id] || null); }
+  });
+});}
+function delClip(id){ return dbPromise.then(function(){
+  delete _mem[id];
+  if(!DB_OK){ return; }
+  return new Promise(function(res){
+    try{
+      var tx = _db.transaction(AUDIO_STORE,"readwrite");
+      tx.objectStore(AUDIO_STORE).delete(id);
+      tx.oncomplete = function(){ res(); }; tx.onerror = function(){ res(); };
+    }catch(e){ res(); }
+  });
+});}
+function clearClips(){ return dbPromise.then(function(){
+  _mem = {};
+  if(!DB_OK){ return; }
+  return new Promise(function(res){
+    try{
+      var tx = _db.transaction(AUDIO_STORE,"readwrite");
+      tx.objectStore(AUDIO_STORE).clear();
+      tx.oncomplete = function(){ res(); }; tx.onerror = function(){ res(); };
+    }catch(e){ res(); }
+  });
+});}
+
+/* recording state (only one clip records at a time) */
+var MR_OK = !!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia && window.MediaRecorder);
+var rec = null;          // {recorder, id, t0, timer, cap, cancelled}
+var _playUrl = null;     // last object URL, revoked on replace
+
+function entryById(id){
+  for(var i=0;i<state.entries.length;i++){ if(state.entries[i].id===id) return state.entries[i]; }
+  return null;
+}
+function pickMime(){
+  var c = ["audio/webm;codecs=opus","audio/webm","audio/mp4","audio/aac"];
+  for(var i=0;i<c.length;i++){
+    if(window.MediaRecorder && MediaRecorder.isTypeSupported && MediaRecorder.isTypeSupported(c[i])) return c[i];
+  }
+  return "";
+}
+function clipName(e, ext){
+  var t = (e && e.local ? e.local : "").replace(/:/g,"");
+  return "drive-audio_"+(state.veh||"vehicle").replace(/\s+/g,"")+"_"+(state.date||today())+"_"+t+"."+ext;
+}
+function startRec(id){
+  if(rec){ flash("finish current recording first"); return; }
+  navigator.mediaDevices.getUserMedia({audio:true}).then(function(stream){
+    var mime = pickMime(), recorder;
+    try{ recorder = mime ? new MediaRecorder(stream,{mimeType:mime}) : new MediaRecorder(stream); }
+    catch(e){ recorder = new MediaRecorder(stream); }
+    var chunks = [];
+    recorder.ondataavailable = function(ev){ if(ev.data && ev.data.size) chunks.push(ev.data); };
+    recorder.onstop = function(){
+      stream.getTracks().forEach(function(t){ t.stop(); });
+      var cancelled = rec && rec.cancelled; rec = null;
+      if(cancelled){ render(); return; }
+      var type = recorder.mimeType || mime || "audio/webm";
+      var blob = new Blob(chunks, {type:type});
+      var ext = (type.indexOf("mp4")>-1 || type.indexOf("aac")>-1) ? "m4a" : "webm";
+      var e = entryById(id);
+      var name = clipName(e, ext);
+      putClip(id, {blob:blob, mime:type, name:name}).then(function(){
+        if(e){ e.hasAudio = true; e.audioName = name; }
+        save(); render(); flash("voice note saved");
+      });
+    };
+    rec = {recorder:recorder, id:id, t0:Date.now()};
+    try{ recorder.start(); }catch(e){ rec=null; flash("could not start mic"); return; }
+    if(navigator.vibrate) navigator.vibrate(20);
+    rec.cap   = setTimeout(function(){ if(rec && rec.id===id) stopRec(); }, 5*60*1000); // 5-min safety cap
+    rec.timer = setInterval(updateRecTimer, 500);
+    render();
+  }).catch(function(){ flash("mic permission needed"); });
+}
+function stopRec(){
+  if(!rec) return;
+  clearInterval(rec.timer); clearTimeout(rec.cap);
+  try{ rec.recorder.stop(); }catch(e){ rec=null; render(); }
+}
+function cancelRec(){
+  if(!rec) return;
+  rec.cancelled = true;
+  clearInterval(rec.timer); clearTimeout(rec.cap);
+  try{ rec.recorder.stop(); }catch(e){ rec=null; }
+}
+function updateRecTimer(){
+  var el = document.getElementById("rectime");
+  if(!el || !rec) return;
+  var s = Math.floor((Date.now()-rec.t0)/1000);
+  el.textContent = Math.floor(s/60)+":"+pad(s%60);
+}
+function playClip(id, audioEl){
+  getClip(id).then(function(r){
+    if(!r || !r.blob){ flash("clip not found"); return; }
+    if(_playUrl){ try{ URL.revokeObjectURL(_playUrl); }catch(e){} }
+    _playUrl = URL.createObjectURL(r.blob);
+    audioEl.src = _playUrl; audioEl.style.display = "block";
+    audioEl.play().catch(function(){});
+  });
+}
+function shareClip(id){
+  getClip(id).then(function(r){
+    if(!r || !r.blob){ flash("clip not found"); return; }
+    try{
+      var file = new File([r.blob], r.name || ("clip_"+id), {type:r.mime||"audio/webm"});
+      if(navigator.canShare && navigator.canShare({files:[file]})){
+        navigator.share({files:[file], title:r.name}).then(function(){flash("shared");}).catch(function(){});
+        return;
+      }
+    }catch(e){}
+    try{
+      var a = document.createElement("a");
+      a.href = URL.createObjectURL(r.blob); a.download = r.name || ("clip_"+id);
+      document.body.appendChild(a); a.click(); document.body.removeChild(a);
+      flash("downloaded");
+    }catch(e){ flash("could not share clip"); }
+  });
+}
 
 var state = load();
 
@@ -162,6 +334,11 @@ function showBanner(){
   b.style.display="block";
 }
 if(!STORE_OK) showBanner();
+
+if(!MR_OK){
+  document.getElementById("ahint").textContent =
+    "Voice notes need a hosted (https) page — same as saving. Opened from email or a preview, recording is off.";
+}
 
 /* hydrate header */
 document.getElementById("veh").value  = state.veh;
@@ -256,23 +433,64 @@ function render(){
         '<button class="del" type="button" aria-label="delete">&times;</button>'+
       '</div>'+
       '<input class="loc" placeholder="location" value="'+esc(e.location)+'">'+
-      '<input class="note" placeholder="note (add when parked)" value="'+esc(e.note)+'">';
+      '<input class="note" placeholder="note (add when parked)" value="'+esc(e.note)+'">'+
+      audioMarkup(e);
     div.querySelector(".del").addEventListener("click", function(){
+      if(rec && rec.id===e.id) cancelRec();
+      delClip(e.id);
       state.entries = state.entries.filter(function(x){return x.id!==e.id;}); save(); render();
     });
     div.querySelector(".loc").addEventListener("change", function(ev){ e.location=ev.target.value; save(); });
     div.querySelector(".note").addEventListener("change", function(ev){ e.note=ev.target.value; save(); });
+    wireAudio(div, e);
     list.appendChild(div);
+  });
+}
+
+/* per-entry audio controls: record while parked, play back, share the clip */
+function audioMarkup(e){
+  if(!MR_OK) return "";
+  if(rec && rec.id===e.id){
+    return '<div class="arow">'+
+      '<button class="abtn stop" type="button" data-a="stop">&#9632; Stop</button>'+
+      '<span class="rectime" id="rectime">0:00</span></div>';
+  }
+  if(e.hasAudio){
+    return '<div class="arow">'+
+      '<button class="abtn play"  type="button" data-a="play">&#9654; Play note</button>'+
+      '<button class="abtn"       type="button" data-a="rerec">Re-record</button>'+
+      '<button class="abtn"       type="button" data-a="ashare">Share clip</button>'+
+      '<button class="abtn x"     type="button" data-a="adel" aria-label="remove voice note">&times;</button>'+
+      '</div><audio class="aud" controls preload="none" style="display:none"></audio>';
+  }
+  return '<div class="arow"><button class="abtn rec" type="button" data-a="rec">&#9679; Record note</button></div>';
+}
+function wireAudio(div, e){
+  var audioEl = div.querySelector(".aud");
+  div.querySelectorAll(".abtn").forEach(function(b){
+    b.addEventListener("click", function(){
+      switch(b.getAttribute("data-a")){
+        case "rec":    startRec(e.id); break;
+        case "stop":   stopRec(); break;
+        case "play":   playClip(e.id, audioEl); break;
+        case "rerec":  startRec(e.id); break;
+        case "ashare": shareClip(e.id); break;
+        case "adel":
+          if(!confirm("Remove this voice note?")) break;
+          delClip(e.id); e.hasAudio=false; e.audioName=""; save(); render();
+          break;
+      }
+    });
   });
 }
 function esc(s){ return String(s||"").replace(/&/g,"&amp;").replace(/"/g,"&quot;").replace(/</g,"&lt;"); }
 
 /* CSV */
 function csv(){
-  var head = ["shift_date","vehicle","operator","crew","event_time_local","event_time_iso","type","location","note"];
+  var head = ["shift_date","vehicle","operator","crew","event_time_local","event_time_iso","type","location","note","audio_file"];
   var rows = [head];
   state.entries.slice().reverse().forEach(function(e){
-    rows.push([state.date, state.veh, state.op, state.crew, e.local, e.iso, e.type, e.location, e.note]);
+    rows.push([state.date, state.veh, state.op, state.crew, e.local, e.iso, e.type, e.location, e.note, (e.hasAudio ? (e.audioName||"") : "")]);
   });
   return rows.map(function(r){ return r.map(function(c){
     c = String(c==null?"":c);
@@ -292,19 +510,25 @@ document.getElementById("closePanel").addEventListener("click", function(){
   document.getElementById("panel").style.display="none";
 });
 
-/* Share — best path on mobile */
+/* Share — best path on mobile. Bundles the CSV + every voice note when the
+   platform allows multi-file sharing; otherwise falls back to CSV alone. */
 document.getElementById("share").addEventListener("click", function(){
   var data = csv();
-  try{
-    var file = new File([data], fname(), {type:"text/csv"});
-    if(navigator.canShare && navigator.canShare({files:[file]})){
-      navigator.share({files:[file], title:fname()}).then(function(){flash("shared");}).catch(function(){});
+  var ids = state.entries.filter(function(e){return e.hasAudio;}).map(function(e){return e.id;});
+  Promise.all(ids.map(getClip)).then(function(clips){
+    var files = [];
+    try{ files.push(new File([data], fname(), {type:"text/csv"})); }catch(e){}
+    clips.forEach(function(r){
+      if(r && r.blob){ try{ files.push(new File([r.blob], r.name, {type:r.mime||"audio/webm"})); }catch(e){} }
+    });
+    if(navigator.canShare && files.length && navigator.canShare({files:files})){
+      navigator.share({files:files, title:fname()}).then(function(){flash("shared");}).catch(function(){});
       return;
     }
-  }catch(e){}
-  // no file share: share plain text, else fall back to download
-  if(navigator.share){ navigator.share({title:fname(), text:data}).then(function(){flash("shared");}).catch(function(){}); }
-  else downloadCsv();
+    // couldn't share files (too many, or unsupported): share CSV text, else download
+    if(navigator.share){ navigator.share({title:fname(), text:data}).then(function(){flash("shared");}).catch(function(){}); }
+    else downloadCsv();
+  });
 });
 
 /* Download — works desktop + Android */
@@ -337,6 +561,8 @@ document.getElementById("copy").addEventListener("click", function(){
 /* New shift */
 document.getElementById("reset").addEventListener("click", function(){
   if(!confirm("Start a new shift? This clears all current marks. Export first if you haven't.")) return;
+  if(rec) cancelRec();
+  clearClips();
   state = { veh:val("veh"), op:val("op"), date:today(), crew:val("crew"), entries:[] };
   document.getElementById("date").value = state.date;
   document.getElementById("panel").style.display="none";
@@ -360,6 +586,8 @@ document.getElementById("reset").addEventListener("click", function(){
   if(haveMarks && p.veh && state.veh && p.veh !== state.veh){
     if(confirm("Start a new shift for " + p.veh + "? Current marks for " +
                (state.veh || "this shift") + " will be cleared. Export first if needed.")){
+      if(rec) cancelRec();
+      clearClips();
       state = { veh:"", op:"", date:today(), crew:"", entries:[] };
     } else { stripQuery(); return; }
   }
