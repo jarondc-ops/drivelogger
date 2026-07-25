@@ -111,16 +111,8 @@
   <p class="hint">Passenger logs while moving. Solo drivers: tap MARK only, then classify and add notes — typed or spoken — when parked. Nothing here needs typing while driving.</p>
   <p class="a-hint" id="ahint"></p>
 
-  <div class="tags">
-    <span class="lbl">Tag the last mark (optional)</span>
-    <button class="chip" type="button" data-t="disengagement">Disengagement</button>
-    <button class="chip" type="button" data-t="near-miss">Near-miss</button>
-    <button class="chip" type="button" data-t="VRU">VRU</button>
-    <button class="chip" type="button" data-t="construction">Construction</button>
-    <button class="chip" type="button" data-t="lane-closure">Lane closure</button>
-    <button class="chip" type="button" data-t="railroad">Railroad</button>
-    <button class="chip" type="button" data-t="emergency">Emergency veh.</button>
-    <button class="chip" type="button" data-t="other">Other</button>
+  <div class="tags" id="tags">
+    <span class="lbl" id="tagsLbl">Tag the last mark (optional)</span>
   </div>
 
   <div class="count" id="count">0 marks</div>
@@ -428,12 +420,52 @@ document.getElementById("mark").addEventListener("click", function(){
 });
 
 /* chips tag the most recent entry */
-document.querySelectorAll(".chip").forEach(function(c){
-  c.addEventListener("click", function(){
+/* Chip catalog: scenario code -> short label. Codes match the Ops Database
+   scenario taxonomy, so exported "type" values join straight to it. */
+var TAG_LABELS = {
+  INT4WAY:"4-way int", NARROW:"Narrow rd", KEEPCLEAR:"Keep Clear", LANECLOSE:"Lane closure",
+  PARKINGLOT:"Parking lot", MICROMOB:"Bike/Scooter", PARKS:"Parks", ROUNDABOUT:"Roundabout",
+  FOG:"Fog", TUNNEL:"Tunnel", BEACH:"Beach", NIGHT:"Night", DELIVERYBOT:"Delivery bot",
+  YELLOWLINE:"Yellow line", BLUELINE:"Blue line", PUDDLE:"Puddle", CONSTRUCTION:"Construction",
+  AIRPORT:"Airport", SPORTS:"Sports", RAILROAD:"Railroad", EMERGENCY:"EMV",
+  PEDDRIVE:"Ped in road", VRUPED:"Jaywalker", VRUALT:"Cyclist/skater", SIGNS:"Signs", OTHER:"Other"
+};
+// Shown when NOT launched from a mission link (broad, general-purpose set).
+var DEFAULT_CHIPS = ["EMERGENCY","VRUPED","MICROMOB","DELIVERYBOT","SIGNS","ROUNDABOUT",
+                     "RAILROAD","CONSTRUCTION","LANECLOSE","KEEPCLEAR","PEDDRIVE","OTHER"];
+// Always available even in mission mode (the shared-focus markers + escape hatch).
+var CORE_CHIPS = ["EMERGENCY","RAILROAD","PEDDRIVE","OTHER"];
+
+function labelFor(code){ return TAG_LABELS[code] || code; }
+
+function renderChips(){
+  var box = document.getElementById("tags");
+  var lbl = document.getElementById("tagsLbl");
+  // remove existing chip buttons (keep the label span)
+  Array.prototype.slice.call(box.querySelectorAll(".chip")).forEach(function(b){ box.removeChild(b); });
+  var mission = state.chips && state.chips.length;
+  var list = mission ? state.chips.slice() : DEFAULT_CHIPS.slice();
+  if(list.indexOf("OTHER") < 0) list.push("OTHER");
+  lbl.textContent = mission
+    ? "Tag the last mark — this shift's scenarios"
+    : "Tag the last mark (optional)";
+  list.forEach(function(code){
+    var b = document.createElement("button");
+    b.className = "chip"; b.type = "button"; b.setAttribute("data-t", code);
+    b.textContent = labelFor(code);
+    box.appendChild(b);
+  });
+}
+
+// One delegated handler survives re-rendering of the chips.
+document.getElementById("tags").addEventListener("click", function(e){
+  var c = e.target.closest ? e.target.closest(".chip") : null;
+  if(!c){ return; }
+  (function(){
     if(!state.entries.length){ flash("tap MARK first"); return; }
     state.entries[0].type = c.getAttribute("data-t");
     save(); render();
-  });
+  })();
 });
 
 function render(){
@@ -582,10 +614,10 @@ document.getElementById("reset").addEventListener("click", function(){
   if(!confirm("Start a new shift? This clears all current marks. Export first if you haven't.")) return;
   if(rec) cancelRec();
   clearClips();
-  state = { veh:val("veh"), op:val("op"), date:today(), crew:val("crew"), entries:[] };
+  state = { veh:val("veh"), op:val("op"), date:today(), crew:val("crew"), entries:[], chips:null };
   document.getElementById("date").value = state.date;
   document.getElementById("panel").style.display="none";
-  save(); render();
+  save(); renderChips(); render();
 });
 
 /* Prefill the shift header from URL params (?veh=&op=&date=&crew=), e.g. the
@@ -599,7 +631,7 @@ document.getElementById("reset").addEventListener("click", function(){
     var i = kv.indexOf("="); if(i < 0) return;
     p[decodeURIComponent(kv.slice(0,i))] = decodeURIComponent(kv.slice(i+1).replace(/\+/g," "));
   });
-  if(!(p.veh || p.op || p.date || p.crew)) return;
+  if(!(p.veh || p.op || p.date || p.crew || p.tags)) return;
 
   var haveMarks = state.entries && state.entries.length;
   if(haveMarks && p.veh && state.veh && p.veh !== state.veh){
@@ -618,11 +650,18 @@ document.getElementById("reset").addEventListener("click", function(){
   document.getElementById("op").value   = state.op;
   document.getElementById("date").value = state.date || today();
   document.getElementById("crew").value = state.crew;
+  if(p.tags){
+    var mt = p.tags.split(",").map(function(t){ return t.trim().toUpperCase(); }).filter(Boolean);
+    CORE_CHIPS.forEach(function(c){ if(mt.indexOf(c) < 0) mt.push(c); });
+    if(mt.length) state.chips = mt;
+  }
   save();
+  renderChips();
   stripQuery();
 })();
 function stripQuery(){ try{ history.replaceState(null, "", window.location.pathname); }catch(e){} }
 
+renderChips();
 render();
 </script>
 </body>
