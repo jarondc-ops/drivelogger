@@ -458,7 +458,7 @@ document.getElementById("mark").addEventListener("click", function(){
     local: pad(d.getHours())+":"+pad(d.getMinutes())+":"+pad(d.getSeconds()),
     iso: d.toISOString(), 
     type: "", 
-    location: "Locating...", // Show user feedback while loading
+    location: "", // filled by best-effort geolocation; stays blank if unavailable
     note: ""
   };
 
@@ -475,45 +475,50 @@ document.getElementById("mark").addEventListener("click", function(){
     } else if(MR_OK){ soloRecord(newEntry.id); }                            // no speech API -> record a clip
   }
 
-  // 2. Fetch location
-  if (!navigator.geolocation) {
-    newEntry.location = "Geolocation not supported";
-    save(); render();
-    return;
+  // 2. Best-effort location. This NEVER writes an error into the field and never
+  //    overwrites a value the operator typed. If it can't get a fix, the field is
+  //    left blank so it can be filled when parked. Geolocation needs a secure
+  //    (https) origin, so we skip it silently otherwise.
+  function locSet(val){
+    var e = entryById(newEntry.id);
+    if (!e) return;                       // entry was deleted
+    if (e.location && e.location.trim()) return;  // don't clobber a typed value
+    e.location = val; save();
+    var inp = document.querySelector('#list .loc[data-id="' + e.id + '"]');
+    if (inp) inp.value = val; else render();
   }
 
-  navigator.geolocation.getCurrentPosition(
-    async function success(position) {
-      const lat = position.coords.latitude;
-      const lng = position.coords.longitude;
-
-      try {
-        const data = await fetch(
-          `https://nominatim.openstreetmap.org/reverse?lat=${lat}&lon=${lng}&format=json`, 
-          { headers: { 'User-Agent': 'DriveLogger/1.0' } }
-        ).then(res => res.json());
-
-        // Target newEntry directly (avoids index race conditions)
-        newEntry.location = data.address?.road || "Street not found";
-      } catch (e) {
-        newEntry.location = "Failed to fetch street";
-      }
-
-      // 3. Save and re-render the UI once location arrives
-      save(); 
-      render();
-    },
-    function error(err) {
-      newEntry.location = "Location permission denied";
-      save(); 
-      render();
-    },
-    {
-      enableHighAccuracy: true,
-      timeout: 10000, // Bumped to 10s so high-accuracy GPS doesn't time out
-      maximumAge: 0
-    }
-  );
+  if (navigator.geolocation && window.isSecureContext) {
+    navigator.geolocation.getCurrentPosition(
+      function success(position) {
+        const lat = position.coords.latitude, lng = position.coords.longitude;
+        const coords = lat.toFixed(5) + ", " + lng.toFixed(5);
+        locSet(coords);                   // immediate fallback so there's always something usable
+        fetch("https://nominatim.openstreetmap.org/reverse?lat=" + lat + "&lon=" + lng + "&format=json")
+          .then(function(res){ return res.json(); })
+          .then(function(data){
+            var road = data && data.address && (data.address.road || data.address.pedestrian || data.address.neighbourhood);
+            if (road) {
+              var e = entryById(newEntry.id);
+              if (e && (!e.location || e.location === coords)) {   // upgrade coords -> street name
+                e.location = road; save();
+                var inp = document.querySelector('#list .loc[data-id="' + e.id + '"]');
+                if (inp) inp.value = road; else render();
+              }
+            }
+          })
+          .catch(function(){ /* keep the coords fallback */ });
+      },
+      function error(err) {
+        // Transient status only — nothing written to the field.
+        var msg = "location unavailable";
+        if (err && err.code === 1) msg = "location off for this site";
+        else if (err && err.code === 3) msg = "location timed out";
+        flash(msg);
+      },
+      { enableHighAccuracy: true, timeout: 10000, maximumAge: 30000 }
+    );
+  }
 });
 
 /* chips tag the most recent entry */
@@ -581,7 +586,7 @@ function render(){
         '<span class="type">'+(e.type||"unclassified")+'</span>'+
         '<button class="del" type="button" aria-label="delete">&times;</button>'+
       '</div>'+
-      '<input class="loc" placeholder="location" value="'+esc(e.location)+'">'+
+      '<input class="loc" data-id="'+e.id+'" placeholder="location" value="'+esc(e.location)+'">'+
       '<input class="note" data-id="'+e.id+'" placeholder="note (add when parked)" value="'+esc(e.note)+'">'+
       audioMarkup(e);
     div.querySelector(".del").addEventListener("click", function(){
