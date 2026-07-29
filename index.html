@@ -124,8 +124,8 @@
   </div>
 
   <button class="markbtn" id="mark" type="button">MARK</button>
-  <div class="recbar" id="recbar">● Recording voice note — auto-stops in <b><span id="recsec">20</span>s</b>. Tap MARK again to log a new event.</div>
-  <p class="hint">Passenger logs while moving. <b>Solo:</b> one tap on MARK logs the moment <b>and</b> records a short voice note — say a few words, then keep driving. Classify and add detail when parked.</p>
+  <div class="recbar" id="recbar">● Capturing voice note — auto-stops in <b><span id="recsec">20</span>s</b>. Tap MARK again to log a new event.</div>
+  <p class="hint">Passenger logs while moving. <b>Solo:</b> one tap on MARK logs the moment <b>and</b> transcribes a short spoken note into the mark — say a few words, then keep driving. Review when parked.</p>
   <p class="a-hint" id="ahint"></p>
 
   <div class="tags" id="tags">
@@ -261,6 +261,48 @@ function setRecUI(on){
   }
 }
 
+var SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+var SR_OK = !!SR;
+var _sr = null, _srId = null, _pendingTranscribe = null, _srFallback = null;
+
+function noteInputFor(id){ return document.querySelector('#list .note[data-id="' + id + '"]'); }
+
+// Solo live transcription: stream speech into the mark's note field as the driver talks.
+function startTranscribe(id){
+  if(!SR_OK) return false;
+  var e = entryById(id); if(!e) return false;
+  var r; try { r = new SR(); } catch(err){ return false; }
+  r.lang = "en-US"; r.continuous = true; r.interimResults = true;
+  var base = e.note ? (e.note + " ") : "", finalText = "";
+  r.onresult = function(ev){
+    var interim = "";
+    for(var i = ev.resultIndex; i < ev.results.length; i++){
+      var t = ev.results[i][0].transcript;
+      if(ev.results[i].isFinal) finalText += t + " "; else interim += t;
+    }
+    e.note = (base + finalText + interim).replace(/\s+/g," ").trim();
+    var inp = noteInputFor(id); if(inp) inp.value = e.note;   // live, no re-render (smooth)
+    save();
+  };
+  r.onerror = function(ev){
+    if(_srId === id && MR_OK && ev && (ev.error === "no-speech" || ev.error === "audio-capture" || ev.error === "network")){
+      _pendingTranscribe = null; _srFallback = id;
+    }
+  };
+  r.onend = function(){
+    setRecUI(false); _sr = null; var done = _srId; _srId = null; save(); render();
+    if(_srFallback === done){ _srFallback = null; if(MR_OK) soloRecord(done); return; }
+    if(_pendingTranscribe != null){ var nid = _pendingTranscribe; _pendingTranscribe = null; startTranscribe(nid); }
+    else flash("note transcribed");
+  };
+  _sr = r; _srId = id;
+  try { r.start(); } catch(err){ _sr = null; _srId = null; return false; }
+  setRecUI(true);
+  setTimeout(function(){ if(_sr && _srId === id){ try{ _sr.stop(); }catch(e){} } }, SOLO_CAP_MS);
+  return true;
+}
+function stopTranscribe(){ if(_sr){ try{ _sr.stop(); }catch(e){} } }
+
 function soloRecord(id){
   if(!MR_OK) return;
   if(rec){ _pendingRec = id; stopRec(); return; }   // finalize current note, then start the new one
@@ -367,17 +409,6 @@ function downloadClip(r){
     flash("downloaded");
   }catch(e){ flash("could not share clip"); }
 }
-function shareClip(id){
-  // Share synchronously when the blob is already in memory (preserves the tap's
-  // activation). If it isn't loaded yet, fetch it, then the next tap will share.
-  var cached = _clipCache[id];
-  if(cached){ doShareClip(cached, false); return; }
-  getClip(id).then(function(r){
-    if(!r || !r.blob){ flash("clip not found"); return; }
-    _clipCache[id] = r;
-    doShareClip(r, true);
-  });
-}
 
 var state = load();
 
@@ -437,7 +468,12 @@ document.getElementById("mark").addEventListener("click", function(){
   render();
 
   if(navigator.vibrate) navigator.vibrate(40);
-  if(isSolo() && MR_OK) soloRecord(newEntry.id);   // solo: one tap logs + records a short voice note
+  if(isSolo()){                                    // solo: one tap logs + captures a spoken note
+    if(SR_OK){
+      if(_sr){ _pendingTranscribe = newEntry.id; stopTranscribe(); }        // finalize current, then start new
+      else if(!startTranscribe(newEntry.id) && MR_OK){ soloRecord(newEntry.id); }
+    } else if(MR_OK){ soloRecord(newEntry.id); }                            // no speech API -> record a clip
+  }
 
   // 2. Fetch location
   if (!navigator.geolocation) {
@@ -546,7 +582,7 @@ function render(){
         '<button class="del" type="button" aria-label="delete">&times;</button>'+
       '</div>'+
       '<input class="loc" placeholder="location" value="'+esc(e.location)+'">'+
-      '<input class="note" placeholder="note (add when parked)" value="'+esc(e.note)+'">'+
+      '<input class="note" data-id="'+e.id+'" placeholder="note (add when parked)" value="'+esc(e.note)+'">'+
       audioMarkup(e);
     div.querySelector(".del").addEventListener("click", function(){
       if(rec && rec.id===e.id) cancelRec();
@@ -572,7 +608,6 @@ function audioMarkup(e){
     return '<div class="arow">'+
       '<button class="abtn play"  type="button" data-a="play">&#9654; Play note</button>'+
       '<button class="abtn"       type="button" data-a="rerec">Re-record</button>'+
-      '<button class="abtn"       type="button" data-a="ashare">Share clip</button>'+
       '<button class="abtn x"     type="button" data-a="adel" aria-label="remove voice note">&times;</button>'+
       '</div><audio class="aud" controls preload="none" style="display:none"></audio>';
   }
@@ -587,7 +622,6 @@ function wireAudio(div, e){
         case "stop":   stopRec(); break;
         case "play":   playClip(e.id, audioEl); break;
         case "rerec":  startRec(e.id); break;
-        case "ashare": shareClip(e.id); break;
         case "adel":
           if(!confirm("Remove this voice note?")) break;
           delClip(e.id); e.hasAudio=false; e.audioName=""; save(); render();
@@ -600,17 +634,21 @@ function esc(s){ return String(s||"").replace(/&/g,"&amp;").replace(/"/g,"&quot;
 
 /* CSV */
 function csv(){
-  var head = ["shift_date","vehicle","operator","crew","event_time_local","event_time_iso","type","location","note"];
-  var rows = [head];
+  // Readable block: labeled header line, a column line, then one pipe-delimited
+  // event per line. Reads cleanly pasted into the debrief; the sheet-side parser
+  // splits it back into columns.
+  function clean(x){ return String(x==null?"":x).replace(/[|\r\n]+/g," ").trim(); }
+  var lines = [];
+  lines.push("DRIVE LOG \u2014 " + clean(state.veh) + " \u2014 " + clean(state.op) +
+             " \u2014 " + clean(state.date) + " (" + (clean(state.crew)||"?") + ")");
+  lines.push("Time | Type | Location | Note");
   state.entries.slice().reverse().forEach(function(e){
-    rows.push([state.date, state.veh, state.op, state.crew, e.local, e.iso, e.type, e.location, e.note]);
+    lines.push(clean(e.local) + " | " + (clean(e.type)||"unclassified") +
+               " | " + (clean(e.location)||"-") + " | " + (clean(e.note)||"-"));
   });
-  return rows.map(function(r){ return r.map(function(c){
-    c = String(c==null?"":c);
-    return /[",\n]/.test(c) ? '"'+c.replace(/"/g,'""')+'"' : c;
-  }).join(","); }).join("\n");
+  return lines.join("\n");
 }
-function fname(){ return "drive-log_"+(state.veh||"vehicle").replace(/\s+/g,"")+"_"+(state.date||today())+".csv"; }
+function fname(){ return "drive-log_"+(state.veh||"vehicle").replace(/\s+/g,"")+"_"+(state.date||today())+".txt"; }
 
 /* Export panel */
 document.getElementById("export").addEventListener("click", function(){
@@ -626,12 +664,12 @@ document.getElementById("closePanel").addEventListener("click", function(){
 /* Share — must run synchronously inside the tap. The browser only allows
    navigator.share during a live user gesture, and that permission is lost the
    moment we await anything (e.g. an IndexedDB read). So we share the CSV alone
-   here; voice notes go out via each clip's own "Share clip" button. */
+   here; solo notes are transcribed straight into the note text, so there is no audio to share. */
 document.getElementById("share").addEventListener("click", function(){
   var data = csv();
   function onErr(err){ if(!err || err.name!=="AbortError") flash("sharing unavailable here — use Download"); }
   try{
-    var file = new File([data], fname(), {type:"text/csv"});
+    var file = new File([data], fname(), {type:"text/plain"});
     if(navigator.canShare && navigator.canShare({files:[file]})){
       navigator.share({files:[file], title:fname()}).then(function(){flash("shared");}).catch(onErr);
       return;
@@ -648,7 +686,7 @@ document.getElementById("share").addEventListener("click", function(){
 /* Download — works desktop + Android */
 function downloadCsv(){
   try{
-    var blob = new Blob([csv()], {type:"text/csv"});
+    var blob = new Blob([csv()], {type:"text/plain"});
     var a = document.createElement("a");
     a.href = URL.createObjectURL(blob); a.download = fname();
     document.body.appendChild(a); a.click(); document.body.removeChild(a);
