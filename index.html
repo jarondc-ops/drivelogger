@@ -276,15 +276,38 @@ function startTranscribe(id){
   r.lang = "en-US"; r.continuous = true; r.interimResults = true;
   var base = e.note ? (e.note + " ") : "";
   r.onresult = function(ev){
-    // Rebuild the full transcript each event from index 0. ev.results already holds
-    // every finalized result plus the current interim, so scanning it fresh avoids the
-    // staircase duplication ("speed speed limit speed limit 25 ...") that accumulating caused.
-    var finalT = "", interimT = "";
+    // Some engines (notably iOS Safari) emit the SAME phrase repeatedly as it grows
+    // ("signs" -> "signs on" -> "signs on the road"), each as a separate result.
+    // Concatenating those causes the staircase duplication. So we merge any result
+    // that's just a longer/shorter version of the one before it, and only keep
+    // genuinely separate phrases.
+    var segs = [];
+    function add(t){
+      t = String(t).trim(); if(!t) return;
+      if(segs.length){
+        var last = segs[segs.length-1], a = last.toLowerCase(), c = t.toLowerCase();
+        if(c.indexOf(a) === 0 || a.indexOf(c) === 0){        // one is a prefix of the other
+          segs[segs.length-1] = (t.length >= last.length) ? t : last;   // keep the fuller one
+          return;
+        }
+      }
+      segs.push(t);
+    }
+    var interimLast = "";
     for(var i = 0; i < ev.results.length; i++){
       var t = ev.results[i][0].transcript;
-      if(ev.results[i].isFinal) finalT += t + " "; else interimT += t;
+      if(ev.results[i].isFinal) add(t); else interimLast = t;   // only the newest interim
     }
-    e.note = (base + finalT + interimT).replace(/\s+/g," ").trim();
+    var display = segs.slice();
+    if(interimLast){                                            // fold the live interim in for display
+      var lt = interimLast.trim();
+      if(display.length){
+        var l = display[display.length-1], a2 = l.toLowerCase(), c2 = lt.toLowerCase();
+        if(c2.indexOf(a2) === 0 || a2.indexOf(c2) === 0) display[display.length-1] = (lt.length >= l.length) ? lt : l;
+        else display.push(lt);
+      } else if(lt) display.push(lt);
+    }
+    e.note = (base + display.join(" ")).replace(/\s+/g," ").trim();
     var inp = noteInputFor(id); if(inp) inp.value = e.note;   // live, no re-render (smooth)
     save();
   };
