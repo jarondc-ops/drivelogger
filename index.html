@@ -561,7 +561,11 @@ var TAG_LABELS = {
   AIRPORT:"Airport", SPORTS:"Sports", RAILROAD:"Railroad", EMERGENCY:"EMV",
   PEDDRIVE:"Ped in road", VRUPED:"Jaywalker", VRUALT:"Cyclist/skater", SIGNS:"Signs",
   RECREATION:"Rec area", PEDPOSTURE:"Atypical ped", TRANSIT:"Transit", SCHOOLZONE:"School zone",
-  DOORING:"Dooring", TRAFFICCTRL:"Traffic ctrl", SFMAP:"SF map", OTHER:"Other"
+  DOORING:"Dooring", TRAFFICCTRL:"Traffic ctrl", SFMAP:"SF map",
+  MOBILITYAID:"Mobility aid", GROUPCROSSING:"Group crossing", VEHSIGNAL:"Veh signal",
+  DBLPARK:"Double-parked", AGGRMERGE:"Aggressive merge", TOWTRAILER:"Tow / trailer",
+  STALLEDVEH:"Stalled vehicle", FADEDLANE:"Faded lane lines", WILDLIFE:"Wildlife", DEBRIS:"Road debris",
+  OTHER:"Other"
 };
 // Shown when NOT launched from a mission link (broad, general-purpose set).
 var DEFAULT_CHIPS = ["EMERGENCY","VRUPED","MICROMOB","DELIVERYBOT","SIGNS","ROUNDABOUT",
@@ -573,8 +577,19 @@ function labelFor(code){ return TAG_LABELS[code] || code; }
 
 // Options for a per-entry type dropdown (any mark can be classified any time).
 function typeOptions(sel){
+  // Build from the union of: this shift's assigned tags (state.chips), the mark's own
+  // current value, and the known catalog. This guarantees any tag a lead adds on the
+  // Assignments tab is selectable here even if it's not in the Scenarios/label list yet.
+  var seen = {}, order = [];
+  function push(code){
+    if(code == null) return; code = String(code); if(!code) return;
+    if(!seen[code]){ seen[code] = true; order.push(code); }
+  }
+  (state.chips || []).forEach(push);              // this shift's scenarios first
+  Object.keys(TAG_LABELS).forEach(push);          // then the full known catalog
+  push(sel);                                      // and always the current value
   var opts = '<option value="">unclassified</option>';
-  Object.keys(TAG_LABELS).forEach(function(code){
+  order.forEach(function(code){
     opts += '<option value="'+code+'"'+(code===sel?' selected':'')+'>'+labelFor(code)+'</option>';
   });
   return opts;
@@ -730,7 +745,7 @@ function fname(){ return "drive-log_"+(state.veh||"vehicle").replace(/\s+/g,"")+
 // ---- Send straight to the Ops sheet's "Logger Events" tab ----
 // Paste your deployed Apps Script Web App URL here (and matching token if you set one).
 // Leave OPS_ENDPOINT empty to keep the old manual Export/Share panel instead.
-var OPS_ENDPOINT = "https://script.google.com/macros/s/AKfycbyXBdfgRLchuOB5uirZ3ok-Cnm5R3drNQHLPnx69SPBQ9zqWz419jARtXXoTviHys8/exec";
+var OPS_ENDPOINT = "";
 var OPS_TOKEN = "";
 
 function opsPayload(){
