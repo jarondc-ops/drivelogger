@@ -2,6 +2,9 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
+<meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+<meta http-equiv="Pragma" content="no-cache">
+<meta http-equiv="Expires" content="0">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="theme-color" content="#0a0e14">
 <meta name="apple-mobile-web-app-capable" content="yes">
@@ -39,6 +42,12 @@
     border:none; border-radius:20px; background:var(--mark); color:#0a0e14;
     box-shadow:0 6px 0 var(--mark-press); transition:transform .05s, box-shadow .05s;
     touch-action:manipulation; margin-bottom:6px;}
+  .markwrap{position:relative;}
+  .marked{position:absolute; left:50%; bottom:14px; transform:translateX(-50%) translateY(6px);
+    background:var(--ok); color:#04140a; font-weight:800; font-size:15px; padding:7px 16px; border-radius:999px;
+    box-shadow:0 3px 12px rgba(0,0,0,.45); opacity:0; pointer-events:none; white-space:nowrap;
+    transition:opacity .12s ease, transform .12s ease;}
+  .marked.show{opacity:1; transform:translateX(-50%) translateY(0);}
   .markbtn:active{transform:translateY(5px); box-shadow:0 1px 0 var(--mark-press);}
   .hint{color:var(--muted); font-size:13px; text-align:center; margin:0 0 14px; line-height:1.4;}
 
@@ -124,7 +133,10 @@
     <input id="crew" placeholder="Crew: solo / two-person" autocomplete="off">
   </div>
 
-  <button class="markbtn" id="mark" type="button">MARK</button>
+  <div class="markwrap">
+    <button class="markbtn" id="mark" type="button">MARK</button>
+    <div class="marked" id="marked"></div>
+  </div>
   <div class="recbar" id="recbar">● Capturing voice note — auto-stops in <b><span id="recsec">20</span>s</b>. Tap MARK again to log a new event.</div>
   <p class="hint">Passenger logs while moving. <b>Solo:</b> one tap on MARK logs the moment <b>and</b> transcribes a short spoken note into the mark — say a few words, then keep driving. Review when parked.</p>
   <p class="a-hint" id="ahint"></p>
@@ -156,6 +168,22 @@
 
 <script>
 "use strict";
+// ---- Auto-update: bump BOTH this number and version.json when you upload a new build ----
+var APP_VERSION = 20260819;   // format: YYYYMMDD of the build you upload
+(function checkUpdate(){
+  try{
+    fetch("version.json?ts=" + Date.now(), { cache: "no-store" })
+      .then(function(r){ return r.json(); })
+      .then(function(d){
+        var remote = parseInt(d && d.version, 10);
+        if(!remote || remote <= APP_VERSION) return;              // already current (or offline miss)
+        if(sessionStorage.getItem("dl_upd") === String(remote)) return;  // tried once already -> avoid loops
+        sessionStorage.setItem("dl_upd", String(remote));
+        location.replace(location.pathname + "?v=" + remote);     // cache-busted reload to the new build
+      })
+      .catch(function(){});   // offline: keep running the current version, no reload
+  }catch(e){}
+})();
 var KEY = "atoms.drivelogger.v1";
 
 /* ---- storage that fails safely ---- */
@@ -264,7 +292,7 @@ function setRecUI(on){
 
 var SR = window.SpeechRecognition || window.webkitSpeechRecognition;
 var SR_OK = !!SR;
-var _sr = null, _srId = null, _pendingTranscribe = null, _srFallback = null;
+var _sr = null, _srId = null, _pendingTranscribe = null, _srFallback = null, _srWatch = null;
 
 function noteInputFor(id){ return document.querySelector('#list .note[data-id="' + id + '"]'); }
 
@@ -317,6 +345,7 @@ function startTranscribe(id){
     }
   };
   r.onend = function(){
+    clearTimeout(_srWatch);
     setRecUI(false); _sr = null; var done = _srId; _srId = null;
     var de = entryById(done); if(de && !de.type){ var g = classify(de.note); if(g) de.type = g; }
     save(); render();
@@ -328,6 +357,17 @@ function startTranscribe(id){
   try { r.start(); } catch(err){ _sr = null; _srId = null; return false; }
   setRecUI(true);
   setTimeout(function(){ if(_sr && _srId === id){ try{ _sr.stop(); }catch(e){} } }, SOLO_CAP_MS);
+  // Hard watchdog: if a stalled recognizer never fires onend (common in poor connectivity),
+  // force it loose so it can't wedge later MARK presses.
+  _srWatch = setTimeout(function(){
+    if(_sr && _srId === id){
+      try{ _sr.abort(); }catch(e){}
+      _sr = null; _srId = null; setRecUI(false);
+      var de = entryById(id); if(de && !de.type){ var g = classify(de.note); if(g) de.type = g; }
+      save(); render();
+      if(_pendingTranscribe != null){ var nid = _pendingTranscribe; _pendingTranscribe = null; startTranscribe(nid); }
+    }
+  }, SOLO_CAP_MS + 4000);
   return true;
 }
 function stopTranscribe(){ if(_sr){ try{ _sr.stop(); }catch(e){} } }
@@ -458,6 +498,14 @@ function today(){ var d=new Date(); return d.getFullYear()+"-"+pad(d.getMonth()+
 function pad(n){ return (n<10?"0":"")+n; }
 function flash(msg){ var el=document.getElementById("saved"); el.textContent=msg; clearTimeout(el._t); el._t=setTimeout(function(){el.textContent="";},1400); }
 
+// Big, glanceable tap confirmation over the button — no need to look at the list.
+function confirmMark(t){
+  var el=document.getElementById("marked"); if(!el) return;
+  el.textContent = "\u2713 Logged " + t;
+  el.classList.add("show");
+  clearTimeout(el._t); el._t=setTimeout(function(){ el.classList.remove("show"); }, 1300);
+}
+
 function showBanner(){
   var b=document.getElementById("banner");
   b.innerHTML = "On-device saving is <b>off</b> in this view, so marks won't survive closing the tab. This happens when the file is opened straight from email or a preview. Keep this tab open and use <b>Export / Share</b> before you leave — or host the file / Add to Home Screen so saving works.";
@@ -491,15 +539,16 @@ document.getElementById("mark").addEventListener("click", function(){
     note: ""
   };
 
-  // 1. Add entry to array and render immediately
+  // 1. Add entry and paint just this row — constant time regardless of list size
   state.entries.unshift(newEntry);
-  save(); 
-  render();
+  save();
+  prependEntry(newEntry);
+  confirmMark(newEntry.local);
 
   if(navigator.vibrate) navigator.vibrate(40);
   if(isSolo()){                                    // solo: one tap logs + captures a spoken note
     if(SR_OK){
-      if(_sr){ _pendingTranscribe = newEntry.id; stopTranscribe(); }        // finalize current, then start new
+      if(_sr){ _pendingTranscribe = newEntry.id; try{ _sr.abort(); }catch(e){ _sr = null; } }   // interrupt now; don't wait on a hung stop()
       else if(!startTranscribe(newEntry.id) && MR_OK){ soloRecord(newEntry.id); }
     } else if(MR_OK){ soloRecord(newEntry.id); }                            // no speech API -> record a clip
   }
@@ -523,7 +572,8 @@ document.getElementById("mark").addEventListener("click", function(){
         const lat = position.coords.latitude, lng = position.coords.longitude;
         const coords = lat.toFixed(5) + ", " + lng.toFixed(5);
         locSet(coords);                   // immediate fallback so there's always something usable
-        fetch("https://nominatim.openstreetmap.org/reverse?lat=" + lat + "&lon=" + lng + "&format=json")
+        var _gc = new AbortController(); setTimeout(function(){ try{ _gc.abort(); }catch(e){} }, 6000);
+        fetch("https://nominatim.openstreetmap.org/reverse?lat=" + lat + "&lon=" + lng + "&format=json", { signal: _gc.signal })
           .then(function(res){ return res.json(); })
           .then(function(data){
             var road = data && data.address && (data.address.road || data.address.pedestrian || data.address.neighbourhood);
@@ -545,7 +595,7 @@ document.getElementById("mark").addEventListener("click", function(){
         else if (err && err.code === 3) msg = "location timed out";
         flash(msg);
       },
-      { enableHighAccuracy: true, timeout: 10000, maximumAge: 30000 }
+      { enableHighAccuracy: false, timeout: 6000, maximumAge: 60000 }
     );
   }
 });
@@ -571,7 +621,7 @@ var TAG_LABELS = {
 var DEFAULT_CHIPS = ["EMERGENCY","VRUPED","MICROMOB","DELIVERYBOT","SIGNS","ROUNDABOUT",
                      "RAILROAD","CONSTRUCTION","LANECLOSE","KEEPCLEAR","PEDDRIVE","OTHER"];
 // Always available even in mission mode (the shared-focus markers + escape hatch).
-var CORE_CHIPS = ["EMERGENCY","RAILROAD","PEDDRIVE","OTHER"];
+var CORE_CHIPS = ["EMERGENCY","RAILROAD","VRUPED","CONSTRUCTION","LANECLOSE","PEDDRIVE","OTHER"];
 
 function labelFor(code){ return TAG_LABELS[code] || code; }
 
@@ -652,39 +702,53 @@ document.getElementById("tags").addEventListener("click", function(e){
   })();
 });
 
-function render(){
-  var list = document.getElementById("list");
+function updateCount(){
   var n = state.entries.length;
   document.getElementById("count").textContent = n + (n===1?" mark":" marks");
-  if(!n){ list.innerHTML = '<div class="empty">No marks yet. Tap MARK when something happens.</div>'; return; }
-  list.innerHTML = "";
-  state.entries.forEach(function(e){
-    var div = document.createElement("div"); div.className="entry";
-    div.innerHTML =
-      '<div class="top">'+
-        '<span class="time">'+e.local+'</span>'+
-        '<select class="typesel" data-id="'+e.id+'">'+typeOptions(e.type||"")+'</select>'+
-        '<button class="del" type="button" aria-label="delete">&times;</button>'+
-      '</div>'+
-      '<input class="loc" data-id="'+e.id+'" placeholder="location" value="'+esc(e.location)+'">'+
-      '<input class="note" data-id="'+e.id+'" placeholder="note (add when parked)" value="'+esc(e.note)+'">'+
-      audioMarkup(e);
-    div.querySelector(".del").addEventListener("click", function(){
-      if(rec && rec.id===e.id) cancelRec();
-      delClip(e.id);
-      state.entries = state.entries.filter(function(x){return x.id!==e.id;}); save(); render();
-    });
-    var tsel = div.querySelector(".typesel");
-    if(tsel) tsel.addEventListener("change", function(ev){ e.type = ev.target.value; save(); });
-    div.querySelector(".loc").addEventListener("change", function(ev){ e.location=ev.target.value; save(); });
-    div.querySelector(".note").addEventListener("change", function(ev){
-      e.note = ev.target.value;
-      if(!e.type){ var g = classify(e.note); if(g){ e.type = g; render(); } }
-      save();
-    });
-    wireAudio(div, e);
-    list.appendChild(div);
+}
+// Build one entry's DOM node (shared by full render and the fast single-add path).
+function buildEntryNode(e){
+  var div = document.createElement("div"); div.className="entry";
+  div.innerHTML =
+    '<div class="top">'+
+      '<span class="time">'+e.local+'</span>'+
+      '<select class="typesel" data-id="'+e.id+'">'+typeOptions(e.type||"")+'</select>'+
+      '<button class="del" type="button" aria-label="delete">&times;</button>'+
+    '</div>'+
+    '<input class="loc" data-id="'+e.id+'" placeholder="location" value="'+esc(e.location)+'">'+
+    '<input class="note" data-id="'+e.id+'" placeholder="note (add when parked)" value="'+esc(e.note)+'">'+
+    audioMarkup(e);
+  div.querySelector(".del").addEventListener("click", function(){
+    if(rec && rec.id===e.id) cancelRec();
+    delClip(e.id);
+    state.entries = state.entries.filter(function(x){return x.id!==e.id;}); save(); render();
   });
+  var tsel = div.querySelector(".typesel");
+  if(tsel) tsel.addEventListener("change", function(ev){ e.type = ev.target.value; save(); });
+  div.querySelector(".loc").addEventListener("change", function(ev){ e.location=ev.target.value; save(); });
+  div.querySelector(".note").addEventListener("change", function(ev){
+    e.note = ev.target.value;
+    if(!e.type){ var g = classify(e.note); if(g){ e.type = g; render(); } }
+    save();
+  });
+  wireAudio(div, e);
+  return div;
+}
+// Fast path: add just the newest mark to the top — constant time no matter how many marks exist.
+function prependEntry(e){
+  var list = document.getElementById("list");
+  var empty = list.querySelector(".empty"); if(empty) list.innerHTML = "";
+  list.insertBefore(buildEntryNode(e), list.firstChild);
+  updateCount();
+}
+function render(){
+  var list = document.getElementById("list");
+  updateCount();
+  if(!state.entries.length){ list.innerHTML = '<div class="empty">No marks yet. Tap MARK when something happens.</div>'; return; }
+  list.innerHTML = "";
+  var frag = document.createDocumentFragment();
+  state.entries.forEach(function(e){ frag.appendChild(buildEntryNode(e)); });
+  list.appendChild(frag);
 }
 
 /* per-entry audio controls: record while parked, play back, share the clip */
