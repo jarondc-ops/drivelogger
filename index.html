@@ -51,11 +51,13 @@
   .markbtn:active{transform:translateY(5px); box-shadow:0 1px 0 var(--mark-press);}
   .hint{color:var(--muted); font-size:13px; text-align:center; margin:0 0 14px; line-height:1.4;}
 
-  .tags{display:flex; flex-wrap:wrap; gap:8px; margin-bottom:6px;}
-  .tags .lbl{width:100%; color:var(--muted); font-size:12px; text-transform:uppercase; letter-spacing:.1em;}
-  .chip{padding:11px 14px; font-size:15px; border-radius:999px; border:1px solid var(--line);
+  .tags{display:grid; grid-template-columns:repeat(auto-fill, minmax(104px, 1fr)); gap:10px; margin-bottom:6px;}
+  .tags .lbl{grid-column:1 / -1; color:var(--muted); font-size:12px; text-transform:uppercase; letter-spacing:.1em; margin-bottom:2px;}
+  .chip{display:flex; align-items:center; justify-content:center; text-align:center;
+    min-height:68px; padding:8px; font-size:14px; line-height:1.15; word-break:break-word;
+    border-radius:14px; border:1px solid var(--line);
     background:var(--tag); color:var(--ink); touch-action:manipulation;}
-  .chip:active{background:var(--tag-on);}
+  .chip:active{background:var(--tag-on); transform:scale(0.97);}
 
   .count{color:var(--muted); font-size:13px; margin:16px 0 8px;}
   .entry{background:var(--panel); border:1px solid var(--line); border-radius:12px;
@@ -169,7 +171,7 @@
 <script>
 "use strict";
 // ---- Auto-update: bump BOTH this number and version.json when you upload a new build ----
-var APP_VERSION = 20260819;   // format: YYYYMMDD of the build you upload
+var APP_VERSION = 20260822;   // format: YYYYMMDD of the build you upload
 (function checkUpdate(){
   try{
     fetch("version.json?ts=" + Date.now(), { cache: "no-store" })
@@ -679,7 +681,11 @@ function renderChips(){
   Array.prototype.slice.call(box.querySelectorAll(".chip")).forEach(function(b){ box.removeChild(b); });
   var mission = state.chips && state.chips.length;
   var list = mission ? state.chips.slice() : DEFAULT_CHIPS.slice();
-  if(list.indexOf("OTHER") < 0) list.push("OTHER");
+  var seen = {}, uniq = [];
+  list.forEach(function(c){ if(c && !seen[c]){ seen[c] = true; uniq.push(c); } });
+  list = uniq.filter(function(c){ return c !== "OTHER"; });
+  list.sort(function(a, b){ return labelFor(a).toLowerCase().localeCompare(labelFor(b).toLowerCase()); });
+  list.push("OTHER");   // escape hatch always pinned last
   lbl.textContent = mission
     ? "Tag the last mark — this shift's scenarios"
     : "Tag the last mark (optional)";
