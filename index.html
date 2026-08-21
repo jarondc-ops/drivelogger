@@ -171,7 +171,7 @@
 <script>
 "use strict";
 // ---- Auto-update: bump BOTH this number and version.json when you upload a new build ----
-var APP_VERSION = 20260822;   // format: YYYYMMDD of the build you upload
+var APP_VERSION = 20260825;   // format: YYYYMMDD of the build you upload
 (function checkUpdate(){
   try{
     fetch("version.json?ts=" + Date.now(), { cache: "no-store" })
@@ -637,9 +637,13 @@ function typeOptions(sel){
     if(code == null) return; code = String(code); if(!code) return;
     if(!seen[code]){ seen[code] = true; order.push(code); }
   }
-  (state.chips || []).forEach(push);              // this shift's scenarios first
-  Object.keys(TAG_LABELS).forEach(push);          // then the full known catalog
+  (state.chips || []).forEach(push);              // this shift's assigned tags
+  Object.keys(TAG_LABELS).forEach(push);          // the full known catalog
   push(sel);                                      // and always the current value
+  // Alphabetical by label, with OTHER pinned last — matches the chip grid order.
+  order = order.filter(function(c){ return c !== "OTHER"; });
+  order.sort(function(a, b){ return labelFor(a).toLowerCase().localeCompare(labelFor(b).toLowerCase()); });
+  order.push("OTHER");
   var opts = '<option value="">unclassified</option>';
   order.forEach(function(code){
     opts += '<option value="'+code+'"'+(code===sel?' selected':'')+'>'+labelFor(code)+'</option>';
@@ -963,7 +967,9 @@ if(navigator.permissions && navigator.permissions.query){
 
 renderChips();
 if(OPS_ENDPOINT){ var xb=document.getElementById('export'); if(xb) xb.textContent='Send to Ops Sheet'; }
+window.addEventListener("load", function(){ var _ve=document.getElementById("ver"); if(_ve) _ve.textContent="Drive Logger \u00b7 v" + APP_VERSION; });
 render();
 </script>
+  <div id="ver" style="text-align:center; color:var(--muted); font-size:11px; margin:18px 0 6px;"></div>
 </body>
 </html>
